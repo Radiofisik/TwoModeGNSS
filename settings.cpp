@@ -14,6 +14,7 @@ void settingsDefault() {
   strcpy(settings.ntripUser, "user");
   strcpy(settings.ntripPassword, "pass");
   settings.gnssBaud = 115200;
+  settings.oneShotMode = 0;
 }
 
 void settingsLoad() {

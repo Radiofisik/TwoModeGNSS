@@ -10,6 +10,7 @@ struct Settings {
   char ntripUser[40];
   char ntripPassword[40];
   uint32_t gnssBaud;
+  uint8_t oneShotMode; // 0=none/normal, 1=ntrip, 2=bt
 };
 
 extern Settings settings;

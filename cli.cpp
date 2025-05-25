@@ -9,12 +9,12 @@ String cliReadLineWithEcho(BluetoothSerial &serial) {
   while (true) {
     while (!serial.available()) delay(10);
     char c = serial.read();
-    if (c == '\r') continue;              // Ignore CR
-    if (c == '\n') break;                 // End of line
-    if (c == 8 || c == 127) {             // Backspace or DEL
+    if (c == '\r') continue;   // Ignore CR
+    if (c == '\n') break;      // End of line
+    if (c == 8 || c == 127) {  // Backspace or DEL
       if (line.length() > 0) {
         line.remove(line.length() - 1);
-        serial.print("\b \b");             // Move cursor back, erase char, move back
+        serial.print("\b \b");  // Move cursor back, erase char, move back
       }
     } else if (isPrintable(c)) {
       line += c;
@@ -28,7 +28,7 @@ String cliReadLineWithEcho(BluetoothSerial &serial) {
 void cliMode(BluetoothSerial &serial) {
   serial.println("\n--- CLI MODE ---");
   while (true) {
-    serial.print("Enter command: (show, set param_name value, save, exit)\r\n> ");
+    serial.print("Enter command: (show, set param_name value, save, exit, reboot [bt, ntrip])\r\n> ");
     String cmdline = cliReadLineWithEcho(serial);
     cmdline.trim();
     if (cmdline.length() == 0) continue;
@@ -73,8 +73,32 @@ void cliMode(BluetoothSerial &serial) {
     } else if (cmd == "exit") {
       serial.println("Exiting CLI.");
       break;
-    } else {
-      serial.println("Unknown command.");
+    } else if (cmd == "reboot") {
+      // Syntax: reboot [mode]
+      String remain = cmdline.substring(firstSpace + 1);
+      remain.trim();
+
+      uint8_t requested = 0;  // 0=use normal
+      if (remain.length() == 0) {
+        // No mode, just normal reboot
+        requested = 0;
+      } else if (remain.equalsIgnoreCase("ntrip")) {
+        requested = 1;
+      } else if (remain.equalsIgnoreCase("bt") || remain.equalsIgnoreCase("bluetooth")) {
+        requested = 2;
+      } else {
+        serial.println("Unknown mode. Use: reboot [ntrip|bt]");
+        continue;
+      }
+      if (requested) {
+        settings.oneShotMode = requested;
+        settingsSave();  // save override to EEPROM
+        serial.printf("Rebooting to %s mode...\r\n", requested == 1 ? "NTRIP" : "Bluetooth");
+      } else {
+        serial.println("Rebooting...");
+      }
+      delay(100);
+      ESP.restart();  // Reboot immediately
     }
   }
 }
