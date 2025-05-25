@@ -1,0 +1,292 @@
+=== .\cli.cpp ===
+#include "cli.h"
+#include "settings.h"
+
+extern Settings settings;
+
+// Helper: Read one line with echo (supports backspace)
+String cliReadLineWithEcho(BluetoothSerial &serial) {
+  String line = "";
+  while (true) {
+    while (!serial.available()) delay(10);
+    char c = serial.read();
+    if (c == '\r') continue;              // Ignore CR
+    if (c == '\n') break;                 // End of line
+    if (c == 8 || c == 127) {             // Backspace or DEL
+      if (line.length() > 0) {
+        line.remove(line.length() - 1);
+        serial.print("\b \b");             // Move cursor back, erase char, move back
+      }
+    } else if (isPrintable(c)) {
+      line += c;
+      serial.print(c);
+    }
+  }
+  serial.println();
+  return line;
+}
+
+void cliMode(BluetoothSerial &serial) {
+  serial.println("\n--- CLI MODE ---");
+  while (true) {
+    serial.print("Enter command: (show, set param_name value, save, exit)\r\n> ");
+    String cmdline = cliReadLineWithEcho(serial);
+    cmdline.trim();
+    if (cmdline.length() == 0) continue;
+
+    int firstSpace = cmdline.indexOf(' ');
+    String cmd = (firstSpace == -1) ? cmdline : cmdline.substring(0, firstSpace);
+    cmd.trim();
+
+    if (cmd == "show") {
+      serial.printf("wifi: %s / %s\r\n", settings.ssid, settings.wifiPassword);
+      serial.printf("ntrip host: %s:%u\r\n", settings.casterHost, settings.casterPort);
+      serial.printf("mountpoint: %s\r\n", settings.mountpoint);
+      serial.printf("user: %s\r\n", settings.ntripUser);
+      serial.printf("pass: %s\r\n", settings.ntripPassword);
+      serial.printf("baud: %lu\r\n", (unsigned long)settings.gnssBaud);
+    } else if (cmd == "set") {
+      // Syntax: set param_name value
+      String remain = cmdline.substring(firstSpace + 1);
+      remain.trim();
+      int paramSpace = remain.indexOf(' ');
+      if (paramSpace == -1) {
+        serial.println("Invalid set command. Use: set param_name value");
+        continue;
+      }
+      String par = remain.substring(0, paramSpace);
+      String val = remain.substring(paramSpace + 1);
+      par.trim();
+      val.trim();
+
+      if (par == "ssid") strncpy(settings.ssid, val.c_str(), sizeof(settings.ssid) - 1);
+      else if (par == "wifipass") strncpy(settings.wifiPassword, val.c_str(), sizeof(settings.wifiPassword) - 1);
+      else if (par == "host") strncpy(settings.casterHost, val.c_str(), sizeof(settings.casterHost) - 1);
+      else if (par == "port") settings.casterPort = val.toInt();
+      else if (par == "mount") strncpy(settings.mountpoint, val.c_str(), sizeof(settings.mountpoint) - 1);
+      else if (par == "user") strncpy(settings.ntripUser, val.c_str(), sizeof(settings.ntripUser) - 1);
+      else if (par == "pass") strncpy(settings.ntripPassword, val.c_str(), sizeof(settings.ntripPassword) - 1);
+      else if (par == "baud") settings.gnssBaud = val.toInt();
+      else serial.println("Unknown param");
+    } else if (cmd == "save") {
+      settingsSave();
+      serial.println("Settings saved.");
+    } else if (cmd == "exit") {
+      serial.println("Exiting CLI.");
+      break;
+    } else {
+      serial.println("Unknown command.");
+    }
+  }
+}
+
+=== .\cli.h ===
+#pragma once
+#include <BluetoothSerial.h>
+void cliMode(BluetoothSerial &serial);
+
+=== .\gnss_uart.cpp ===
+#include <HardwareSerial.h>
+HardwareSerial GNSS(2);
+
+=== .\gnss_uart.h ===
+#pragma once
+#include <HardwareSerial.h>
+extern HardwareSerial GNSS;
+
+=== .\mode_bt.cpp ===
+#include "mode_bt.h"
+#include <BluetoothSerial.h>
+#include <HardwareSerial.h>
+#include "settings.h"
+#include "cli.h"
+#include <WiFi.h> 
+#include "gnss_uart.h"
+
+extern Settings settings;
+
+#define UART2_RX 16 // Set according to physical wiring
+#define UART2_TX 17
+
+#define MAGIC_SEQ "+++cli+++"
+#define MAGIC_LEN 8
+char magicBuf[MAGIC_LEN+1] = {0};  // 8 chars + null
+uint8_t magicPos = 0;
+
+BluetoothSerial SerialBT;
+
+void runBluetoothTransparentMode() {
+  // WiFi off for low power
+  WiFi.mode(WIFI_OFF);
+  btStop(); // stop classic, in case
+  delay(50);
+  btStart(); // start
+  // Start Bluetooth
+  SerialBT.begin("RFGNSSESP32");
+  // Start GNSS UART
+  GNSS.begin(settings.gnssBaud, SERIAL_8N1, UART2_RX, UART2_TX);
+
+  for (;;) {
+    // Bluetooth -> GNSS
+    if (SerialBT.available()) {
+      int c = SerialBT.read();
+     
+      // //--- Shift buffer and add new character ---
+      // memmove(magicBuf, magicBuf + 1, MAGIC_LEN - 1);
+      // magicBuf[MAGIC_LEN - 1] = c;
+      // magicBuf[MAGIC_LEN] = 0;
+
+      // // Check for match
+      // if (strcmp(magicBuf, MAGIC_SEQ) == 0) {
+      //     // Reset buffer so retrigger can work after return from CLI
+      //     memset(magicBuf, 0, sizeof(magicBuf));
+      //     cliMode(SerialBT);
+      //     continue;
+      // }
+
+      GNSS.write((uint8_t)c);
+    }
+    // GNSS -> Bluetooth
+    if (GNSS.available()) {
+      SerialBT.write(GNSS.read());
+    }
+    delay(1);
+  }
+}
+
+=== .\mode_bt.h ===
+#pragma once
+
+void runBluetoothTransparentMode();
+
+=== .\mode_ntrip.cpp ===
+#include "mode_ntrip.h"
+#include "settings.h"
+#include <WiFi.h>
+#include <WiFiClient.h>
+// #include "NTRIPClient.h" // You’ll need to install or copy an NTRIP server/client implementation
+#include <HardwareSerial.h>
+#include "gnss_uart.h"
+
+extern Settings settings;
+
+#define UART2_RX 16 // Set according to physical wiring
+#define UART2_TX 17
+
+
+void runNtripServerMode() {
+  // Start WiFi
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(settings.ssid, settings.wifiPassword);
+  unsigned long t0 = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    if (millis() - t0 > 15000) {
+      // timeout, fallback to BT for config if needed
+      // blink LED or similar, or reboot
+      ESP.restart();
+    }
+  }
+
+  GNSS.begin(settings.gnssBaud, SERIAL_8N1, UART2_RX, UART2_TX);
+
+  // NTRIPServer ntrip;
+  // ntrip.begin(settings.casterHost,
+  //             settings.casterPort,
+  //             settings.mountpoint,
+  //             settings.ntripUser,
+  //             settings.ntripPassword);
+
+  for (;;) {
+    // Forward GNSS output to NTRIP server
+    while (GNSS.available()) {
+      // ntrip.send(GNSS.read());
+    }
+    // ntrip.handleClient(); // allow NTRIP server to clear clients/make connections
+    delay(1);
+  }
+}
+
+=== .\mode_ntrip.h ===
+#pragma once
+
+void runNtripServerMode();
+
+=== .\settings.cpp ===
+#include "settings.h"
+#include <EEPROM.h>
+
+Settings settings;
+
+#define EEPROM_SIZE 512
+
+void settingsDefault() {
+  strcpy(settings.ssid, "your_wifi");
+  strcpy(settings.wifiPassword, "your_password");
+  strcpy(settings.casterHost, "ntrip.caster.tld");
+  settings.casterPort = 2101;
+  strcpy(settings.mountpoint, "MYMOUNT");
+  strcpy(settings.ntripUser, "user");
+  strcpy(settings.ntripPassword, "pass");
+  settings.gnssBaud = 115200;
+}
+
+void settingsLoad() {
+  EEPROM.begin(EEPROM_SIZE);
+  if (EEPROM.read(0) != 0xAB) {
+    settingsDefault();
+    settingsSave();
+    return;
+  }
+  EEPROM.get(1, settings);
+}
+
+void settingsSave() {
+  EEPROM.write(0, 0xAB);
+  EEPROM.put(1, settings);
+  EEPROM.commit();
+}
+
+=== .\settings.h ===
+#pragma once
+#include <Arduino.h>
+
+struct Settings {
+  char ssid[33];
+  char wifiPassword[65];
+  char casterHost[40];
+  uint16_t casterPort;
+  char mountpoint[40];
+  char ntripUser[40];
+  char ntripPassword[40];
+  uint32_t gnssBaud;
+};
+
+extern Settings settings;
+
+void settingsLoad();
+void settingsSave();
+
+=== .\twoModeGNSS.ino ===
+#include "mode_bt.h"
+#include "mode_ntrip.h"
+#include "settings.h"
+
+#define BUTTON_PIN 0 // set according to your connection
+
+void setup() {
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  settingsLoad();
+
+  // Detect mode
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    runNtripServerMode();
+  } else {
+    runBluetoothTransparentMode();
+  }
+}
+
+void loop() {
+  // Nothing, all logic inside task loops
+}
+
