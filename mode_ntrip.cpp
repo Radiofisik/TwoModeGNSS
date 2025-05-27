@@ -1,82 +1,94 @@
 #include "mode_ntrip.h"
 #include "settings.h"
-#include <WiFi.h>
-#include <WiFiClient.h>
-// #include "NTRIPClient.h" // You’ll need to install or copy an NTRIP server/client implementation
-#include <HardwareSerial.h>
+#include "ntrip.h"
 #include "gnss_uart.h"
+#include <WiFi.h>
+
+#define UART2_RX 16
+#define UART2_TX 17
+#define LED_PIN 2
 
 extern Settings settings;
 
-#define UART2_RX 16  // Set according to physical wiring
-#define UART2_TX 17
+NtripSourceClient ntrip;
 
-
-#define LED_PIN 2
-
-
-void blinkTask(void *pvParameters) {
-  pinMode(LED_PIN, OUTPUT);
-  for (;;) {
-    digitalWrite(LED_PIN, HIGH);
-    vTaskDelay(1000 / portTICK_PERIOD_MS);  // 1000 ms == 1s
-    digitalWrite(LED_PIN, LOW);
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-  }
-  // Optionally vTaskDelete(NULL);
-}
+// You may tune this chunk size and/or add message detection for RTCM
+#define RTCM_BUF_SIZE 256
+uint8_t rtcmBuf[RTCM_BUF_SIZE];
+size_t rtcmBufPos = 0;
 
 void runNtripServerMode() {
-  pinMode(2, OUTPUT);
-  Serial.begin(115200);
-  delay(100);  // Allow time for Serial to initialize
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
 
-  // Start WiFi
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(settings.ssid, settings.wifiPassword);
-  unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(300);
-    if (millis() - t0 > 15000) {
-      // timeout, fallback to BT for config if needed
-      // blink LED or similar, or reboot
-      ESP.restart();
+    Serial.begin(115200);
+    delay(100);
+
+    // Connect to WiFi
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(settings.ssid, settings.wifiPassword);
+    unsigned long t0 = millis();
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(300);
+        if (millis() - t0 > 15000) {
+            ESP.restart();
+        }
+        digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     }
-  }
+    digitalWrite(LED_PIN, LOW);
 
-  // Once WiFi is connected, print IP address to serial
-  Serial.print("WiFi connected. IP address: ");
-  Serial.println(WiFi.localIP());
+    Serial.print("WiFi connected. IP address: ");
+    Serial.println(WiFi.localIP());
 
-  GNSS.begin(settings.gnssBaud, SERIAL_8N1, UART2_RX, UART2_TX);
+    // Start GNSS UART
+    GNSS.begin(settings.gnssBaud, SERIAL_8N1, UART2_RX, UART2_TX);
 
-  // NTRIPServer ntrip;
-  // ntrip.begin(settings.casterHost,
-  //             settings.casterPort,
-  //             settings.mountpoint,
-  //             settings.ntripUser,
-  //             settings.ntripPassword);
+    // Connect to NTRIP Caster as source
+    bool connected = ntrip.connect(
+        settings.casterHost,
+        settings.casterPort,
+        "RTKLIB/2.4",      // Agent name (can adjust if needed)
+        settings.mountpoint,
+        settings.ntripPassword // pass as "password" (username is ignored)
+    );
 
-  xTaskCreatePinnedToCore(
-    blinkTask,    // Task code
-    "BlinkTask",  // name
-    2048,         // stack size (words, not bytes!)
-    NULL,         // params
-    1,            // priority
-    NULL,         // task handle
-    1);           // core (0 or 1)
+    if (!connected) {
+        Serial.println("[NTRIP] Initial connection failed. Rebooting...");
+        delay(2000);
+        ESP.restart();
+    }
 
-  for (;;) {
+    // Main loop
+    for (;;) {
+        // Buffer and send RTCM in blocks, with header each time
+        while (GNSS.available()) {
+            uint8_t b = GNSS.read();
+            rtcmBuf[rtcmBufPos++] = b;
+            if (rtcmBufPos == RTCM_BUF_SIZE) {
+                ntrip.sendHeader("RTKLIB/2.4", settings.mountpoint, settings.ntripPassword); // send header before block
+                ntrip.sendData(rtcmBuf, rtcmBufPos);
+                rtcmBufPos = 0;
+            }
+        }
 
-   
+        // Flush buffer every 200ms, even if not full
+        static unsigned long lastFlush = 0;
+        if (rtcmBufPos > 0 && millis() - lastFlush > 200) {
+            ntrip.sendHeader("RTKLIB/2.4", settings.mountpoint, settings.ntripPassword);
+            ntrip.sendData(rtcmBuf, rtcmBufPos);
+            rtcmBufPos = 0;
+            lastFlush = millis();
+        }
 
+        ntrip.handle();
 
+        // Reconnect logic if dropped
+        if (!ntrip.isConnected()) {
+            Serial.println("[NTRIP] Disconnected, retrying in 5 seconds...");
+            delay(5000);
+            ESP.restart(); // or re-run the connect() logic, or break to outer loop
+        }
 
-    // Forward GNSS output to NTRIP server
-    //   while (GNSS.available()) {
-    //   // ntrip.send(GNSS.read());
-    // }
-    // ntrip.handleClient(); // allow NTRIP server to clear clients/make connections
-    delay(1);
-  }
+        delay(1);
+    }
 }

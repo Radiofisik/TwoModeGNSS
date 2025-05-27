@@ -5,6 +5,8 @@
 #include "cli.h"
 #include <WiFi.h>
 #include "gnss_uart.h"
+#include "esp_bt.h"
+#include "esp_wifi.h"
 
 extern Settings settings;
 
@@ -13,8 +15,8 @@ extern Settings settings;
 
 #define MAGIC_SEQ "+++cli+++"
 
-#define SERIAL_SIZE_RX 16384  //Using a large buffer. This might be much bigger than needed but the ESP32 has enough RAM
-#define BRIDGE_BUF_SIZE 256
+#define SERIAL_SIZE_RX 4096  //Using a large buffer. This might be much bigger than needed but the ESP32 has enough RAM
+#define BRIDGE_BUF_SIZE 2048
 uint8_t buf[BRIDGE_BUF_SIZE];
 
 BluetoothSerial SerialBT;
@@ -36,10 +38,14 @@ bool detectMagicChar(char input, const char *magicSeq, size_t &index) {
 void runBluetoothTransparentMode() {
   // WiFi off for low power
   WiFi.mode(WIFI_OFF);
+  esp_wifi_stop();
   btStop();  // stop classic, in case
   delay(50);
   setCpuFrequencyMhz(80);
   btStart();  // start
+  esp_bt_controller_mem_release(ESP_BT_MODE_BLE); // If not using BLE
+  esp_bt_sleep_enable();
+
   // Start Bluetooth
   SerialBT.begin("RFGNSSESP32");
   // Start GNSS UART
@@ -75,6 +81,6 @@ void runBluetoothTransparentMode() {
     }
 
     // No or minimal delay!
-    delay(1);  // or just yield()
+    delay(5);  // or just yield()
   }
 }
