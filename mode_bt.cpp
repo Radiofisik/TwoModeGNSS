@@ -3,15 +3,19 @@
 #include <HardwareSerial.h>
 #include "settings.h"
 #include "cli.h"
-#include <WiFi.h> 
+#include <WiFi.h>
 #include "gnss_uart.h"
 
 extern Settings settings;
 
-#define UART2_RX 16 // Set according to physical wiring
+#define UART2_RX 16  // Set according to physical wiring
 #define UART2_TX 17
 
 #define MAGIC_SEQ "+++cli+++"
+
+#define SERIAL_SIZE_RX 16384  //Using a large buffer. This might be much bigger than needed but the ESP32 has enough RAM
+#define BRIDGE_BUF_SIZE 256
+uint8_t buf[BRIDGE_BUF_SIZE];
 
 BluetoothSerial SerialBT;
 
@@ -20,7 +24,7 @@ bool detectMagicChar(char input, const char *magicSeq, size_t &index) {
   if (input == magicSeq[index]) {
     index++;
     if (index == len) {
-      index = 0; // Reset for retriggering
+      index = 0;  // Reset for retriggering
       return true;
     }
   } else {
@@ -30,30 +34,46 @@ bool detectMagicChar(char input, const char *magicSeq, size_t &index) {
 }
 
 void runBluetoothTransparentMode() {
-    // WiFi off for low power
-    WiFi.mode(WIFI_OFF);
-    btStop(); // stop classic, in case
-    delay(50);
-    btStart(); // start
-    // Start Bluetooth
-    SerialBT.begin("RFGNSSESP32");
-    // Start GNSS UART
-    GNSS.begin(settings.gnssBaud, SERIAL_8N1, UART2_RX, UART2_TX);
+  // WiFi off for low power
+  WiFi.mode(WIFI_OFF);
+  btStop();  // stop classic, in case
+  delay(50);
+  btStart();  // start
+  // Start Bluetooth
+  SerialBT.begin("RFGNSSESP32");
+  // Start GNSS UART
+  GNSS.setRxBufferSize(SERIAL_SIZE_RX);
+  GNSS.begin(settings.gnssBaud, SERIAL_8N1, UART2_RX, UART2_TX);
+
 
   size_t magicIndex = 0;
 
   for (;;) {
-    if (SerialBT.available()) {
-      char c = SerialBT.read();
-      if (detectMagicChar(c, MAGIC_SEQ, magicIndex)) {
-        cliMode(SerialBT);
-        continue;
+    // Bluetooth -> GNSS
+    int blen = SerialBT.available();
+    if (blen > 0) {
+      int rlen = SerialBT.readBytes(buf, min(blen, BRIDGE_BUF_SIZE));
+      GNSS.write(buf, rlen);
+    }
+
+    // GNSS -> Bluetooth
+    int ulen = GNSS.available();
+    if (ulen > 0) {
+      int rlen = GNSS.readBytes(buf, min(ulen, BRIDGE_BUF_SIZE));
+      SerialBT.write(buf, rlen);
+    }
+
+    // Magic sequence check
+    if (blen > 0) {
+      for (int i = 0; i < blen; ++i) {
+        if (detectMagicChar(buf[i], MAGIC_SEQ, magicIndex)) {
+          cliMode(SerialBT);
+          break;
+        }
       }
-      GNSS.write((uint8_t)c);
     }
-    if (GNSS.available()) {
-      SerialBT.write(GNSS.read());
-    }
-    delay(1);
+
+    // No or minimal delay!
+    delay(0);  // or just yield()
   }
 }
