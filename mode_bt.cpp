@@ -38,6 +38,7 @@ void runBluetoothTransparentMode() {
   WiFi.mode(WIFI_OFF);
   btStop();  // stop classic, in case
   delay(50);
+  setCpuFrequencyMhz(80);
   btStart();  // start
   // Start Bluetooth
   SerialBT.begin("RFGNSSESP32");
@@ -74,6 +75,6 @@ void runBluetoothTransparentMode() {
     }
 
     // No or minimal delay!
-    delay(0);  // or just yield()
+    delay(1);  // or just yield()
   }
 }
