@@ -18,6 +18,9 @@ uint32_t serverBytesSent = 0;        //Just a running total
 long lastReport_ms = 0;              //Time of last report of bytes sent
 long actualReportDelay = 0;
 
+#define NTRIP_BUF_SIZE 2048
+uint8_t ntripbuf[NTRIP_BUF_SIZE];
+
 void beginServer() {
   Serial.println("Begin transmitting to caster. Press any key to stop");
   delay(10);  //Wait for any serial to arrive
@@ -94,11 +97,20 @@ void beginServer() {
           break;
 
         //Write incoming RTCM to the NTRIP Caster
-        while (GNSS.available()) {
-          ntripCaster.write(GNSS.read());  //Send this byte to socket
-          serverBytesSent++;
+
+        int glen = GNSS.available();
+        if (glen > 0) {
+          int rlen = GNSS.readBytes(ntripbuf, min(glen, NTRIP_BUF_SIZE));
+          ntripCaster.write(ntripbuf, rlen);
+          serverBytesSent += rlen;
           lastSentRTCM_ms = millis();
         }
+
+        // while (GNSS.available()) {
+        //   ntripCaster.write(GNSS.read());  //Send this byte to socket
+        //   serverBytesSent++;
+        //   lastSentRTCM_ms = millis();
+        // }
 
         //Close socket if we don't have new data for 10s
         //RTK2Go will ban your IP address if you abuse it. See http://www.rtk2go.com/how-to-get-your-ip-banned/
