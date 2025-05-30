@@ -1,11 +1,89 @@
-=== .\cli.cpp ===
+=== .\twoModeGNSS.ino ===
+#include "src/mode_bt.h"
+#include "src/mode_ntrip.h"
+#include "src/settings.h"
+
+#define BUTTON_PIN 0  // set according to your connection
+
+void setup() {
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  settingsLoad();
+
+  if (settings.oneShotMode == 1 || settings.oneShotMode == 2) {
+    // Clear flag for next boot!
+    uint8_t mode = settings.oneShotMode;
+    settings.oneShotMode = 0;
+    settingsSave();
+
+    if (mode == 1) {
+      runNtripServerMode();
+    } else if (mode == 2) {
+      runBluetoothTransparentMode();
+    }
+  }
+
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    runNtripServerMode();
+  } else {
+    runBluetoothTransparentMode();
+  }
+}
+
+void loop() {
+  // Nothing, all logic inside task loops
+}
+
+=== .\src\bt.cpp ===
+#include "bt.h"
+#include "esp_bt.h"
+
+BluetoothSerial SerialBT;
+uint8_t buf[BT_BUF_SIZE];
+
+void initBluetooth() {
+  btStop();  // stop classic, in case
+  delay(50);
+  btStart();  // start
+  esp_bt_controller_mem_release(ESP_BT_MODE_BLE); // If not using BLE
+  esp_bt_sleep_enable();
+
+  // Start Bluetooth
+  SerialBT.begin("RFGNSSESP32");
+}
+
+=== .\src\bt.h ===
+#pragma once
+#include <BluetoothSerial.h>
+
+#define BT_BUF_SIZE 2048
+extern uint8_t buf[BT_BUF_SIZE];
+
+extern BluetoothSerial SerialBT;
+
+void initBluetooth();
+
+=== .\src\cli.cpp ===
 #include "cli.h"
 #include "settings.h"
 
 extern Settings settings;
 
+bool detectMagicChar(char input, const char *magicSeq, size_t &index) {
+  size_t len = strlen(magicSeq);
+  if (input == magicSeq[index]) {
+    index++;
+    if (index == len) {
+      index = 0;  // Reset for retriggering
+      return true;
+    }
+  } else {
+    index = (input == magicSeq[0]) ? 1 : 0;
+  }
+  return false;
+}
+
 // Helper: Read one line with echo (supports backspace)
-String cliReadLineWithEcho(BluetoothSerial &serial) {
+String cliReadLineWithEcho(Stream &serial) {
   String line = "";
   while (true) {
     while (!serial.available()) delay(10);
@@ -26,7 +104,7 @@ String cliReadLineWithEcho(BluetoothSerial &serial) {
   return line;
 }
 
-void cliMode(BluetoothSerial &serial) {
+void cliMode(Stream &serial) {
   serial.println("\n--- CLI MODE ---");
   while (true) {
     serial.print("Enter command: (show, set param_name value, save, exit, reboot [bt, ntrip])\r\n> ");
@@ -104,176 +182,311 @@ void cliMode(BluetoothSerial &serial) {
   }
 }
 
-=== .\cli.h ===
+=== .\src\cli.h ===
 #pragma once
 #include <BluetoothSerial.h>
-void cliMode(BluetoothSerial &serial);
 
-=== .\gnss_uart.cpp ===
+#define MAGIC_SEQ "+++cli+++"
+
+void cliMode(Stream &serial);
+
+bool detectMagicChar(char input, const char *magicSeq, size_t &index);
+
+=== .\src\gnss_uart.cpp ===
+#include "gnss_uart.h"
+#include "settings.h"
 #include <HardwareSerial.h>
-HardwareSerial GNSS(2);
 
-=== .\gnss_uart.h ===
+HardwareSerial GNSS(2);
+extern Settings settings;
+
+void initGNSSUART(){
+  // Start GNSS UART
+  GNSS.setRxBufferSize(SERIAL_SIZE_RX);
+  GNSS.begin(settings.gnssBaud, SERIAL_8N1, UART2_RX, UART2_TX);
+}
+
+=== .\src\gnss_uart.h ===
 #pragma once
 #include <HardwareSerial.h>
+
+#define UART2_RX 16  // Set according to physical wiring
+#define UART2_TX 17
+
+#define SERIAL_SIZE_RX 4096  
+
 extern HardwareSerial GNSS;
 
-=== .\mode_bt.cpp ===
+void initGNSSUART();
+
+=== .\src\mode_bt.cpp ===
 #include "mode_bt.h"
 #include <BluetoothSerial.h>
 #include <HardwareSerial.h>
 #include "settings.h"
 #include "cli.h"
-#include <WiFi.h> 
+#include <WiFi.h>
 #include "gnss_uart.h"
+#include "esp_wifi.h"
+#include "bt.h"
 
 extern Settings settings;
 
-#define UART2_RX 16 // Set according to physical wiring
-#define UART2_TX 17
-
-#define MAGIC_SEQ "+++cli+++"
-
-BluetoothSerial SerialBT;
-
-bool detectMagicChar(char input, const char *magicSeq, size_t &index) {
-  size_t len = strlen(magicSeq);
-  if (input == magicSeq[index]) {
-    index++;
-    if (index == len) {
-      index = 0; // Reset for retriggering
-      return true;
-    }
-  } else {
-    index = (input == magicSeq[0]) ? 1 : 0;
-  }
-  return false;
-}
 
 void runBluetoothTransparentMode() {
-    // WiFi off for low power
-    WiFi.mode(WIFI_OFF);
-    btStop(); // stop classic, in case
-    delay(50);
-    btStart(); // start
-    // Start Bluetooth
-    SerialBT.begin("RFGNSSESP32");
-    // Start GNSS UART
-    GNSS.begin(settings.gnssBaud, SERIAL_8N1, UART2_RX, UART2_TX);
+  // WiFi off for low power
+  WiFi.mode(WIFI_OFF);
+  esp_wifi_stop();
+  setCpuFrequencyMhz(80);
+
+  initBluetooth();
+  initGNSSUART();
 
   size_t magicIndex = 0;
 
   for (;;) {
-    if (SerialBT.available()) {
-      char c = SerialBT.read();
-      if (detectMagicChar(c, MAGIC_SEQ, magicIndex)) {
-        cliMode(SerialBT);
-        continue;
+    // Bluetooth -> GNSS
+    int blen = SerialBT.available();
+    if (blen > 0) {
+      int rlen = SerialBT.readBytes(buf, min(blen, BT_BUF_SIZE));
+      GNSS.write(buf, rlen);
+    }
+
+    // GNSS -> Bluetooth
+    int ulen = GNSS.available();
+    if (ulen > 0) {
+      int rlen = GNSS.readBytes(buf, min(ulen, BT_BUF_SIZE));
+      SerialBT.write(buf, rlen);
+    }
+
+    // Magic sequence check
+    if (blen > 0) {
+      for (int i = 0; i < blen; ++i) {
+        if (detectMagicChar(buf[i], MAGIC_SEQ, magicIndex)) {
+          cliMode(SerialBT);
+          break;
+        }
       }
-      GNSS.write((uint8_t)c);
     }
-    if (GNSS.available()) {
-      SerialBT.write(GNSS.read());
-    }
-    delay(1);
+
+    delay(5); 
   }
 }
 
-=== .\mode_bt.h ===
+=== .\src\mode_bt.h ===
 #pragma once
 
 void runBluetoothTransparentMode();
 
-=== .\mode_ntrip.cpp ===
+=== .\src\mode_ntrip.cpp ===
 #include "mode_ntrip.h"
 #include "settings.h"
-#include <WiFi.h>
-#include <WiFiClient.h>
-// #include "NTRIPClient.h" // You’ll need to install or copy an NTRIP server/client implementation
-#include <HardwareSerial.h>
 #include "gnss_uart.h"
+#include <WiFi.h>
+#include "bt.h"
+#include "cli.h"
+
+#define LED_PIN 2
+//choose one
+// #define CONSOLE Serial
+#define CONSOLE SerialBT
 
 extern Settings settings;
 
-#define UART2_RX 16  // Set according to physical wiring
-#define UART2_TX 17
+WiFiClient ntripCaster;
 
+long lastSentRTCM_ms = 0;            //Time of last data pushed to socket
+int maxTimeBeforeHangup_ms = 10000;  //If we fail to get a complete RTCM frame after 10s, then disconnect from caster
+uint32_t serverBytesSent = 0;        //Just a running total
+long lastReport_ms = 0;              //Time of last report of bytes sent
+long actualReportDelay = 0;
 
-#define LED_PIN 2
+#define NTRIP_BUF_SIZE 2048
+uint8_t ntripbuf[NTRIP_BUF_SIZE];
 
+void beginServer() {
+  CONSOLE.println("Begin transmitting to caster. Press any key to stop");
+  delay(10);  //Wait for any serial to arrive
+  while (CONSOLE.available())
+    CONSOLE.read();  //Flush
 
-void blinkTask(void *pvParameters) {
-  pinMode(LED_PIN, OUTPUT);
-  for (;;) {
-    digitalWrite(LED_PIN, HIGH);
-    vTaskDelay(1000 / portTICK_PERIOD_MS);  // 1000 ms == 1s
-    digitalWrite(LED_PIN, LOW);
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  while (CONSOLE.available() == 0) {
+    //Connect if we are not already
+    if (ntripCaster.connected() == false) {
+      CONSOLE.printf("Opening socket to %s\n", settings.casterHost);
+
+      if (ntripCaster.connect(settings.casterHost, settings.casterPort) == true)  //Attempt connection
+      {
+        CONSOLE.printf("Connected to %s:%d\n", settings.casterHost, settings.casterPort);
+
+        const int SERVER_BUFFER_SIZE = 512;
+        char serverRequest[SERVER_BUFFER_SIZE];
+
+        snprintf(serverRequest,
+                 SERVER_BUFFER_SIZE,
+                 "SOURCE %s /%s\r\nSource-Agent: NTRIP SparkFun UM980 Server v1.0\r\n\r\n",
+                 settings.ntripPassword, settings.mountpoint);
+
+        CONSOLE.println(F("Sending server request:"));
+        CONSOLE.println(serverRequest);
+        ntripCaster.write(serverRequest, strlen(serverRequest));
+
+        //Wait for response
+        unsigned long timeout = millis();
+        while (ntripCaster.available() == 0) {
+          if (millis() - timeout > 5000) {
+            CONSOLE.println("Caster timed out!");
+            ntripCaster.stop();
+            return;
+          }
+          delay(10);
+        }
+
+        //Check reply
+        bool connectionSuccess = false;
+        char response[512];
+        int responseSpot = 0;
+        while (ntripCaster.available()) {
+          response[responseSpot++] = ntripCaster.read();
+          if (strstr(response, "200") != nullptr)  //Look for 'ICY 200 OK'
+            connectionSuccess = true;
+          if (responseSpot == 512 - 1)
+            break;
+        }
+        response[responseSpot] = '\0';
+
+        if (connectionSuccess == false) {
+          CONSOLE.printf("Failed to connect to Caster: %s", response);
+          return;
+        }
+      }  //End attempt to connect
+      else {
+        CONSOLE.println("Connection to host failed");
+        return;
+      }
+    }  //End connected == false
+
+    if (ntripCaster.connected() == true) {
+      delay(10);
+      while (CONSOLE.available())
+        CONSOLE.read();  //Flush any endlines or carriage returns
+
+      lastReport_ms = millis();
+      lastSentRTCM_ms = millis();
+
+      //This is the main sending loop. We scan for new data but processRTCM() is where the data actually gets sent out.
+      while (1) {
+        if (CONSOLE.available())
+          break;
+
+        //Write incoming RTCM to the NTRIP Caster
+
+        int glen = GNSS.available();
+        if (glen > 0) {
+          int rlen = GNSS.readBytes(ntripbuf, min(glen, NTRIP_BUF_SIZE));
+          ntripCaster.write(ntripbuf, rlen);
+          serverBytesSent += rlen;
+          lastSentRTCM_ms = millis();
+        }
+
+        //Close socket if we don't have new data for 10s
+        //RTK2Go will ban your IP address if you abuse it. See http://www.rtk2go.com/how-to-get-your-ip-banned/
+        //So let's not leave the socket open/hanging without data
+        if (millis() - lastSentRTCM_ms > maxTimeBeforeHangup_ms) {
+          CONSOLE.println("RTCM timeout. Disconnecting...");
+          ntripCaster.stop();
+          return;
+        }
+
+        delay(10);
+
+        //Report some statistics every 250
+        actualReportDelay = millis() - lastReport_ms;
+        if (actualReportDelay > 1000) {
+          ntripCaster.stop();
+          return;
+        }
+        if (actualReportDelay > 250) {
+          lastReport_ms += actualReportDelay;
+          CONSOLE.printf("Total sent: %d\n", serverBytesSent);
+        }
+      }
+    }
+
+    delay(10);
   }
-  // Optionally vTaskDelete(NULL);
 }
 
 void runNtripServerMode() {
-  pinMode(2, OUTPUT);
-  Serial.begin(115200);
-  delay(100);  // Allow time for Serial to initialize
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
 
-  // Start WiFi
+  Serial.begin(115200);
+  initGNSSUART();
+  initBluetooth();
+  delay(250);
+
+  CONSOLE.println();
+  CONSOLE.println("ntrip server mode");
+
+  // Connect to WiFi
   WiFi.mode(WIFI_STA);
   WiFi.begin(settings.ssid, settings.wifiPassword);
   unsigned long t0 = millis();
   while (WiFi.status() != WL_CONNECTED) {
     delay(300);
     if (millis() - t0 > 15000) {
-      // timeout, fallback to BT for config if needed
-      // blink LED or similar, or reboot
-      ESP.restart();
+      if (!CONSOLE.available()) {
+        CONSOLE.println("restart to ntrip mode due to timeout connecting to wifi");
+        settings.oneShotMode = 1;
+        settingsSave();
+        ESP.restart();
+      }
+      else{
+         cliMode(CONSOLE);
+      }
     }
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
   }
+  digitalWrite(LED_PIN, LOW);
 
-  // Once WiFi is connected, print IP address to serial
-  Serial.print("WiFi connected. IP address: ");
-  Serial.println(WiFi.localIP());
+  CONSOLE.print("WiFi connected. IP address: ");
+  CONSOLE.println(WiFi.localIP());
 
-  GNSS.begin(settings.gnssBaud, SERIAL_8N1, UART2_RX, UART2_TX);
 
-  // NTRIPServer ntrip;
-  // ntrip.begin(settings.casterHost,
-  //             settings.casterPort,
-  //             settings.mountpoint,
-  //             settings.ntripUser,
-  //             settings.ntripPassword);
+  size_t magicIndex = 0;
 
-  xTaskCreatePinnedToCore(
-    blinkTask,    // Task code
-    "BlinkTask",  // name
-    2048,         // stack size (words, not bytes!)
-    NULL,         // params
-    1,            // priority
-    NULL,         // task handle
-    1);           // core (0 or 1)
+  //Clear any serial characters from the buffer
+  while (CONSOLE.available())
+    CONSOLE.read();
 
+
+  // Main loop
   for (;;) {
+    beginServer();
 
-   
+    int blen = CONSOLE.available();
+    // Magic sequence check
+    if (blen > 0) {
+      int rlen = CONSOLE.readBytes(buf, min(blen, BT_BUF_SIZE));
+      for (int i = 0; i < blen; ++i) {
+        if (detectMagicChar(buf[i], MAGIC_SEQ, magicIndex)) {
+          cliMode(CONSOLE);
+          break;
+        }
+      }
+    }
 
-
-
-    // Forward GNSS output to NTRIP server
-    //   while (GNSS.available()) {
-    //   // ntrip.send(GNSS.read());
-    // }
-    // ntrip.handleClient(); // allow NTRIP server to clear clients/make connections
-    delay(1);
+    delay(500);
   }
 }
 
-=== .\mode_ntrip.h ===
+=== .\src\mode_ntrip.h ===
 #pragma once
 
 void runNtripServerMode();
 
-=== .\settings.cpp ===
+=== .\src\settings.cpp ===
 #include "settings.h"
 #include <EEPROM.h>
 
@@ -309,7 +522,7 @@ void settingsSave() {
   EEPROM.commit();
 }
 
-=== .\settings.h ===
+=== .\src\settings.h ===
 #pragma once
 #include <Arduino.h>
 
@@ -329,39 +542,4 @@ extern Settings settings;
 
 void settingsLoad();
 void settingsSave();
-
-=== .\twoModeGNSS.ino ===
-#include "mode_bt.h"
-#include "mode_ntrip.h"
-#include "settings.h"
-
-#define BUTTON_PIN 0  // set according to your connection
-
-void setup() {
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  settingsLoad();
-
-  if (settings.oneShotMode == 1 || settings.oneShotMode == 2) {
-    // Clear flag for next boot!
-    uint8_t mode = settings.oneShotMode;
-    settings.oneShotMode = 0;
-    settingsSave();
-
-    if (mode == 1) {
-      runNtripServerMode();
-    } else if (mode == 2) {
-      runBluetoothTransparentMode();
-    }
-  }
-
-  if (digitalRead(BUTTON_PIN) == LOW) {
-    runNtripServerMode();
-  } else {
-    runBluetoothTransparentMode();
-  }
-}
-
-void loop() {
-  // Nothing, all logic inside task loops
-}
 

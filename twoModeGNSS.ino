@@ -1,6 +1,6 @@
-#include "mode_bt.h"
-#include "mode_ntrip.h"
-#include "settings.h"
+#include "src/mode_bt.h"
+#include "src/mode_ntrip.h"
+#include "src/settings.h"
 
 #define BUTTON_PIN 0  // set according to your connection
 
