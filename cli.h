@@ -1,3 +1,8 @@
 #pragma once
 #include <BluetoothSerial.h>
-void cliMode(BluetoothSerial &serial);
+
+#define MAGIC_SEQ "+++cli+++"
+
+void cliMode(Stream &serial);
+
+bool detectMagicChar(char input, const char *magicSeq, size_t &index);

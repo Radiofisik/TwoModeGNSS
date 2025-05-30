@@ -3,8 +3,22 @@
 
 extern Settings settings;
 
+bool detectMagicChar(char input, const char *magicSeq, size_t &index) {
+  size_t len = strlen(magicSeq);
+  if (input == magicSeq[index]) {
+    index++;
+    if (index == len) {
+      index = 0;  // Reset for retriggering
+      return true;
+    }
+  } else {
+    index = (input == magicSeq[0]) ? 1 : 0;
+  }
+  return false;
+}
+
 // Helper: Read one line with echo (supports backspace)
-String cliReadLineWithEcho(BluetoothSerial &serial) {
+String cliReadLineWithEcho(Stream &serial) {
   String line = "";
   while (true) {
     while (!serial.available()) delay(10);
@@ -25,7 +39,7 @@ String cliReadLineWithEcho(BluetoothSerial &serial) {
   return line;
 }
 
-void cliMode(BluetoothSerial &serial) {
+void cliMode(Stream &serial) {
   serial.println("\n--- CLI MODE ---");
   while (true) {
     serial.print("Enter command: (show, set param_name value, save, exit, reboot [bt, ntrip])\r\n> ");
