@@ -2,7 +2,7 @@
 #include "src/mode_ntrip.h"
 #include "src/settings.h"
 
-#define BUTTON_PIN 0  // set according to your connection
+#define BUTTON_PIN 15  // set according to your connection
 
 void setup() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
